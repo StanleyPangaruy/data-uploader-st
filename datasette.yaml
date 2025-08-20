@@ -1,0 +1,8 @@
+title: My private Datasette instance
+allow: 
+  id: root
+
+databases:
+  eiti_database:
+    allow:
+      id: root

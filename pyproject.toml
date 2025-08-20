@@ -1,0 +1,12 @@
+[project]
+name = "data-uploader-st"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datasette==1.0a14",
+    "datasette-auth-tokens>=0.3",
+    "datasette-write>=0.4",
+    "streamlit>=1.48.1",
+]
