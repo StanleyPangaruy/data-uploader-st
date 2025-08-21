@@ -19,7 +19,7 @@ class DatasetteUploader:
         self.token = token
         self.headers = {}
         if token:
-            self.headers['Authorization'] = f'Bearer {token}'
+            self.headers['Authorization'] = f'Bearer dstok_{token}'
     
     def get_databases(self) -> List[str]:
         """Get list of databases from Datasette instance"""
