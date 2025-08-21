@@ -436,8 +436,13 @@ def main():
             schema = uploader.get_table_schema(database, table)
 
             if schema:
-                col_names = [col['name'] for col in schema]
-                st.write("**Columns in table:**", ", ".join(col_names))
+                # Display schema in a dataframe for clarity
+                schema_df = pd.DataFrame(schema)
+                st.write("**Table Schema:**")
+                st.dataframe(schema_df)
+
+                # Extract column names for PK selection
+                col_names = schema_df.keys().tolist()
 
                 pk_cols = st.multiselect("Select Primary Key Columns", col_names)
 
@@ -452,6 +457,7 @@ def main():
                         st.write("Rows to delete (based on PK values):")
                         st.dataframe(df.head())
 
+                        # Extract only PK values
                         pk_values = df[pk_cols].to_dict("records")
 
                         if st.button("Delete Rows", type="primary"):
@@ -461,6 +467,7 @@ def main():
                                 st.success("✅ Rows deleted successfully!")
                             else:
                                 st.error(f"❌ Failed: {result.get('error', result.get('response'))}")
+
 
     else:
         st.info(f"The '{operation}' feature is coming soon! This prototype focuses on the core create and insert operations.")
