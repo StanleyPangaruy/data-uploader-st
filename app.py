@@ -5,6 +5,7 @@ import json
 from io import StringIO
 import sqlite3
 from typing import Dict, List, Any, Optional
+import urllib.parse
 
 # Configure Streamlit page
 st.set_page_config(
@@ -48,10 +49,10 @@ class DatasetteUploader:
     def get_table_schema(self, database: str, table: str) -> Dict:
         """Get table schema information"""
         try:
-            response = requests.get(f"{self.base_url}/{database}/{table}.json")
+            response = requests.get(f"{self.base_url}/{database}/{table}.json?_=schema")
             if response.status_code == 200:
                 data = response.json()
-                return data.get('columns', [])
+                return data.get('rows', [])
             return []
         except Exception as e:
             st.error(f"Error fetching table schema: {e}")
@@ -113,24 +114,78 @@ class DatasetteUploader:
                 'error': str(e)
             }
     
-    def drop_table(self, database: str, table: str) -> Dict[str, Any]:
-        """Drop a table"""
+    def drop_table(self, database: str, table: str, confirm: bool = False) -> Dict[str, Any]:
+        """Drop a table from the given database."""
         try:
-            response = requests.delete(
-                f"{self.base_url}/{database}/{table}/-/drop",
+            url = f"{self.base_url}/{database}/{table}/-/drop"
+            payload = {"confirm": True} if confirm else {}
+
+            response = requests.post(
+                url,
                 headers={**self.headers, 'Content-Type': 'application/json'},
+                json=payload
             )
-            
+
             return {
                 'success': response.status_code == 200,
                 'status_code': response.status_code,
-                'response': response.text
+                'response': response.json() if response.headers.get("Content-Type") == "application/json" else response.text
             }
         except Exception as e:
             return {
                 'success': False,
                 'error': str(e)
             }
+
+    def update_row(self, database: str, table: str, pk_values: List[str], updates: Dict[str, Any], return_row: bool = True) -> Dict[str, Any]:
+        """Update a row in a table by primary key(s)."""
+        try:
+            # Tilde-encode PKs (Datasette requirement)
+            row_pks = ",".join([urllib.parse.quote(pk, safe="") for pk in pk_values])
+
+            url = f"{self.base_url}/{database}/{table}/{row_pks}/-/update"
+            payload = {
+                "update": updates
+            }
+            if return_row:
+                payload["return"] = True
+
+            response = requests.post(
+                url,
+                headers={**self.headers, 'Content-Type': 'application/json'},
+                json=payload
+            )
+
+            return {
+                "success": response.status_code == 200,
+                "status_code": response.status_code,
+                "response": response.json() if response.headers.get("Content-Type") == "application/json" else response.text
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+    def delete_rows(self, database: str, table: str, pks: List[Any], pk_columns: List[str]) -> Dict[str, Any]:
+        """Delete rows by primary keys"""
+        try:
+            payload = {
+                "pks": pks,
+                "pk_columns": pk_columns
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/{database}/{table}/-/delete",
+                headers={**self.headers, 'Content-Type': 'application/json'},
+                json=payload
+            )
+            
+            return {
+                'success': response.status_code in [200, 201],
+                'status_code': response.status_code,
+                'response': response.text
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 def load_file(uploaded_file) -> Optional[pd.DataFrame]:
     """Load data from uploaded file"""
@@ -318,7 +373,95 @@ def main():
                     st.error(f"❌ Failed to drop table: {result.get('error', result.get('response', 'Unknown error'))}")
         else:
             st.warning("No tables found in the selected database.")
+
+    elif operation == "Update Rows":
+        st.subheader("✏️ Update Rows in Table")
+
+        databases = uploader.get_databases()
+        if not databases:
+            st.error("Could not fetch databases.")
+            return
+        
+        database = st.selectbox("Select Database", databases)
+        tables = uploader.get_tables(database) if database else []
+
+        if tables:
+            table = st.selectbox("Select Table", tables)
+            schema = uploader.get_table_schema(database, table)
+            
+            if schema:
+                # Convert schema into DataFrame for nicer display
+                schema_df = pd.DataFrame(schema)
+                st.write("**Table Schema:**")
+                st.dataframe(schema_df)
+
+                # Extract column names for PK selection
+                col_names = schema_df.keys().tolist()
+
+                uploaded_file = st.file_uploader(
+                    "Upload CSV/Excel with updated rows (must include primary key columns)",
+                    type=['csv', 'xlsx', 'xls']
+                )
+
+                pk_cols = st.multiselect("Select Primary Key Columns", col_names)
+
+                if uploaded_file and pk_cols:
+                    df = load_file(uploaded_file)
+                    if df is not None:
+                        st.write("Preview of updates:")
+                        st.dataframe(df.head())
+
+                        if st.button("Update Rows", type="primary"):
+                            with st.spinner("Updating rows..."):
+                                result = uploader.update_rows(database, table, df.to_dict("records"), pk_cols)
+                            if result.get('success'):
+                                st.success("✅ Rows updated successfully!")
+                            else:
+                                st.error(f"❌ Failed: {result.get('error', result.get('response'))}")
+
     
+    elif operation == "Delete Rows":
+        st.subheader("🗑️ Delete Rows from Table")
+
+        databases = uploader.get_databases()
+        if not databases:
+            st.error("Could not fetch databases.")
+            return
+        
+        database = st.selectbox("Select Database", databases)
+        tables = uploader.get_tables(database) if database else []
+
+        if tables:
+            table = st.selectbox("Select Table", tables)
+            schema = uploader.get_table_schema(database, table)
+
+            if schema:
+                col_names = [col['name'] for col in schema]
+                st.write("**Columns in table:**", ", ".join(col_names))
+
+                pk_cols = st.multiselect("Select Primary Key Columns", col_names)
+
+                uploaded_file = st.file_uploader(
+                    "Upload CSV/Excel with primary key values of rows to delete",
+                    type=['csv', 'xlsx', 'xls']
+                )
+
+                if uploaded_file and pk_cols:
+                    df = load_file(uploaded_file)
+                    if df is not None:
+                        st.write("Rows to delete (based on PK values):")
+                        st.dataframe(df.head())
+
+                        pk_values = df[pk_cols].to_dict("records")
+
+                        if st.button("Delete Rows", type="primary"):
+                            with st.spinner("Deleting rows..."):
+                                result = uploader.delete_rows(database, table, pk_values, pk_cols)
+                            if result.get('success'):
+                                st.success("✅ Rows deleted successfully!")
+                            else:
+                                st.error(f"❌ Failed: {result.get('error', result.get('response'))}")
+
     else:
         st.info(f"The '{operation}' feature is coming soon! This prototype focuses on the core create and insert operations.")
 

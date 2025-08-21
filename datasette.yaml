@@ -1,15 +1,8 @@
 title: My private Datasette instance
+allow:
+  id:
+  - stan
 
-databases:
-  eiti_database:
-    create-table: true
-    insert-row: true
-    drop-table: true
-  Car_Database:
-    create-table: true
-    insert-row: true
-    drop-table: true
-  northwind:
-    create-table: true
-    insert-row: true
-    drop-table: true
+
+
+
