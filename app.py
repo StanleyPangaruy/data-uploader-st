@@ -20,7 +20,7 @@ class DatasetteUploader:
         self.token = token
         self.headers = {}
         if token:
-            self.headers['Authorization'] = f'Bearer dstok_{token}'
+            self.headers['Authorization'] = f'Bearer {token}'
     
     def get_databases(self) -> List[str]:
         """Get list of databases from Datasette instance"""
@@ -137,7 +137,7 @@ class DatasetteUploader:
                 'error': str(e)
             }
 
-    def update_row(self, database: str, table: str, pk_values: List[str], updates: Dict[str, Any], return_row: bool = True) -> Dict[str, Any]:
+    def update_rows(self, database: str, table: str, pk_values: List[str], updates: Dict[str, Any], return_row: bool = True) -> Dict[str, Any]:
         """Update a row in a table by primary key(s)."""
         try:
             # Tilde-encode PKs (Datasette requirement)
@@ -165,27 +165,58 @@ class DatasetteUploader:
             return {"success": False, "error": str(e)}
 
 
-    def delete_rows(self, database: str, table: str, pks: List[Any], pk_columns: List[str]) -> Dict[str, Any]:
-        """Delete rows by primary keys"""
+    def delete_rows(self, database: str, table: str, row_pks: List[Any]) -> Dict[str, Any]:
+        """
+        Delete a row by primary key(s) from a Datasette table.
+        - database: name of the Datasette database
+        - table: table name
+        - row_pks: list of primary key values (single value for single PK, list for composite PK)
+        """
         try:
-            payload = {
-                "pks": pks,
-                "pk_columns": pk_columns
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/{database}/{table}/-/delete",
-                headers={**self.headers, 'Content-Type': 'application/json'},
-                json=payload
-            )
-            
-            return {
-                'success': response.status_code in [200, 201],
-                'status_code': response.status_code,
-                'response': response.text
-            }
+            # Tilde-encode PKs (Datasette requirement: ~ becomes ~~ , / becomes ~s , etc.)
+            def tilde_encode(value: str) -> str:
+                return (
+                    str(value)
+                    .replace("~", "~~")
+                    .replace("/", "~s")
+                    .replace(",", "~c")
+                    .replace("?", "~q")
+                    .replace("#", "~h")
+                )
+
+            if isinstance(row_pks, (list, tuple)):
+                pk_path = ",".join([tilde_encode(str(pk)) for pk in row_pks])
+            else:
+                pk_path = tilde_encode(str(row_pks))
+
+            url = f"{self.base_url}/{database}/{table}/{pk_path}/-/delete"
+            headers = {"Content-Type": "application/json"}
+            if self.token:
+                headers["Authorization"] = f"Bearer {self.token}"
+
+            resp = requests.post(url, headers=headers, json={})
+            resp.raise_for_status()
+
+            return resp.json()
+
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"ok": False, "error": str(e)}
+
+    
+    def get_table_rows(self, database: str, table: str) -> pd.DataFrame:
+        """Fetch rows from a table"""
+        try:
+            url = f"{self.base_url}/{database}/{table}.json?_shape=array"
+            response = requests.get(url, headers=self.headers)
+            if response.status_code == 200:
+                data = response.json()
+                return pd.DataFrame(data) if data else pd.DataFrame()
+            else:
+                return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Error fetching table rows: {e}")
+            return pd.DataFrame()
+
 
 def load_file(uploaded_file) -> Optional[pd.DataFrame]:
     """Load data from uploaded file"""
@@ -293,7 +324,7 @@ def main():
                     
                     if result.get('success'):
                         st.success(f"✅ Table '{table_name}' created successfully!")
-                        st.info(f"You can view your table at: {datasette_url}/{database}/{table_name}")
+                        # st.info(f"You can view your table at: {datasette_url}/{database}/{table_name}")
                     else:
                         st.error(f"❌ Failed to create table: {result.get('error', result.get('response', 'Unknown error'))}")
     
@@ -315,6 +346,13 @@ def main():
             return
         
         table = st.selectbox("Select Table", tables)
+        schema = uploader.get_table_schema(database, table)
+        if schema:
+            schema_df = pd.DataFrame(schema)
+            st.write("**Table Schema:**")
+            st.dataframe(schema_df)
+
+        
         
         uploaded_file = st.file_uploader(
             "Upload Data File",
@@ -330,11 +368,11 @@ def main():
                 st.write(f"Total rows to insert: {len(df)}")
                 
                 # Show table schema for reference
-                schema = uploader.get_table_schema(database, table)
-                if schema:
-                    st.write("**Current table columns:**")
-                    col_names = [col['name'] for col in schema]
-                    st.write(", ".join(col_names))
+                # schema = uploader.get_table_schema(database, table)
+                # if schema:
+                #     st.write("**Current table columns:**")
+                #     col_names = [col['name'] for col in schema]
+                #     st.write(", ".join(col_names))
                 
                 if st.button("Insert Rows", type="primary"):
                     with st.spinner("Inserting rows..."):
@@ -342,7 +380,11 @@ def main():
                     
                     if result.get('success'):
                         st.success(f"✅ Successfully inserted {len(df)} rows into '{table}'!")
-                        st.info(f"View updated table at: {datasette_url}/{database}/{table}")
+                        # st.info(f"View updated table at: {datasette_url}/{database}/{table}")
+                        updated_df = uploader.get_table_rows(database, table)
+                        if not updated_df.empty:
+                            st.write("**Updated Table:**")
+                            st.dataframe(updated_df)
                     else:
                         st.error(f"❌ Failed to insert rows: {result.get('error', result.get('response', 'Unknown error'))}")
     
@@ -390,13 +432,11 @@ def main():
             schema = uploader.get_table_schema(database, table)
             
             if schema:
-                # Convert schema into DataFrame for nicer display
                 schema_df = pd.DataFrame(schema)
                 st.write("**Table Schema:**")
                 st.dataframe(schema_df)
 
-                # Extract column names for PK selection
-                col_names = schema_df.keys().tolist()
+                col_names = schema_df['name'].tolist() if 'name' in schema_df else schema_df.columns.tolist()
 
                 uploaded_file = st.file_uploader(
                     "Upload CSV/Excel with updated rows (must include primary key columns)",
@@ -413,11 +453,31 @@ def main():
 
                         if st.button("Update Rows", type="primary"):
                             with st.spinner("Updating rows..."):
-                                result = uploader.update_rows(database, table, df.to_dict("records"), pk_cols)
-                            if result.get('success'):
-                                st.success("✅ Rows updated successfully!")
-                            else:
-                                st.error(f"❌ Failed: {result.get('error', result.get('response'))}")
+                                all_success = True
+                                errors = []
+                                
+                                # Loop over each record and update individually
+                                for _, row in df.iterrows():
+                                    pk_values = [str(row[pk]) for pk in pk_cols]  # ensure strings
+                                    updates = row.drop(labels=pk_cols).to_dict() # rest of the row
+                                    
+                                    result = uploader.update_rows(database, table, pk_values, updates)
+                                    if not result.get("success"):
+                                        all_success = False
+                                        errors.append(result)
+
+                                if all_success:
+                                    st.success("✅ All rows updated successfully!")
+                                    # Show updated table
+                                    updated_df = uploader.get_table_rows(database, table)
+                                    if not updated_df.empty:
+                                        st.write("**Updated Table:**")
+                                        st.dataframe(updated_df)
+                                    else:
+                                        st.info("No rows found in table or unable to fetch data.")
+                                else:
+                                    st.error(f"❌ Some updates failed: {errors}")
+
 
     
     elif operation == "Delete Rows":
@@ -426,7 +486,7 @@ def main():
         databases = uploader.get_databases()
         if not databases:
             st.error("Could not fetch databases.")
-            return
+            st.stop()
         
         database = st.selectbox("Select Database", databases)
         tables = uploader.get_tables(database) if database else []
@@ -436,37 +496,47 @@ def main():
             schema = uploader.get_table_schema(database, table)
 
             if schema:
-                # Display schema in a dataframe for clarity
                 schema_df = pd.DataFrame(schema)
                 st.write("**Table Schema:**")
                 st.dataframe(schema_df)
 
-                # Extract column names for PK selection
-                col_names = schema_df.keys().tolist()
+                # Extract column names
+                col_names = schema_df['name'].tolist() if 'name' in schema_df else schema_df.columns.tolist()
 
+                # Pick PK columns (order matters!)
                 pk_cols = st.multiselect("Select Primary Key Columns", col_names)
 
-                uploaded_file = st.file_uploader(
-                    "Upload CSV/Excel with primary key values of rows to delete",
-                    type=['csv', 'xlsx', 'xls']
-                )
+                if pk_cols:
+                    st.write("Enter values for the primary key(s) of the row you want to delete:")
 
-                if uploaded_file and pk_cols:
-                    df = load_file(uploaded_file)
-                    if df is not None:
-                        st.write("Rows to delete (based on PK values):")
-                        st.dataframe(df.head())
+                    # Input boxes for each PK column
+                    pk_values = []
+                    for col in pk_cols:
+                        val = st.text_input(f"Value for {col}")
+                        pk_values.append(val)
 
-                        # Extract only PK values
-                        pk_values = df[pk_cols].to_dict("records")
+                    if all(pk_values):  # ensure all fields filled
+                        if st.button("Delete Row", type="primary"):
+                            with st.spinner("Deleting row..."):
+                                result = uploader.delete_rows(
+                                    database, 
+                                    table, 
+                                    pk_values  # pass values in correct order
+                                )
+                            if result.get("ok"):
+                                st.success("✅ Row deleted successfully!")
 
-                        if st.button("Delete Rows", type="primary"):
-                            with st.spinner("Deleting rows..."):
-                                result = uploader.delete_rows(database, table, pk_values, pk_cols)
-                            if result.get('success'):
-                                st.success("✅ Rows deleted successfully!")
+                                # Show updated table
+                                updated_df = uploader.get_table_rows(database, table)
+                                if isinstance(updated_df, pd.DataFrame):
+                                    st.write("**Updated Table:**")
+                                    st.dataframe(updated_df)
+                                else:
+                                    st.warning("Could not fetch updated table.")
                             else:
-                                st.error(f"❌ Failed: {result.get('error', result.get('response'))}")
+                                st.error(f"❌ Failed: {result.get('error')}")
+
+
 
 
     else:
